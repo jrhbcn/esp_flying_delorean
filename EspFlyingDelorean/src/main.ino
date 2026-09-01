@@ -8,23 +8,31 @@
   https://www.facebook.com/groups/599517350568861
 *********/
 
-#include <FS.h>                   //this needs to be first, or it all crashes and burns...
-#include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
-#include <WiFiManager.h>          //https://github.com/tzapu/WiFiManager WiFi Configuration Magic
-#include <ArduinoJson.h>          //https://github.com/bblanchon/ArduinoJson
+#include <Arduino.h>
+#include <LittleFS.h>
+#include <WiFiManager.h>
+#include <ArduinoJson.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_IS31FL3731.h>
 #include <PubSubClient.h>
 #include <ElegantOTA.h>
-#include "animation.h" 
-
-#ifdef ESP32
-  #include <SPIFFS.h>
-#endif
+#include "animation.h"
 
 // Set web server port number to 80
 const unsigned int port = 80;
+
+// --- DYNAMIC BOARD INCLUDES & SERVER ---
+#if defined(ESP8266)
+  #include <ESP8266WiFi.h>
+  #include <ESP8266WebServer.h>
+  ESP8266WebServer server(port);
+#elif defined(ESP32)
+  #include <WiFi.h>
+  #include <WebServer.h>
+  WebServer server(port);
+#endif
+
+
 
 //define your default values here, if there are different values in config.json, they are overwritten.
 char mqtt_server[40];
@@ -38,37 +46,48 @@ char mqtt_ha_topic[40] = "homeassistant";
 // --------------------------------------------------------------
 Adafruit_IS31FL3731_Wing matrix = Adafruit_IS31FL3731_Wing();
 
-ESP8266WebServer server(port);
 
 //flag for saving data
 bool shouldSaveConfig = false;
 
 uint8_t MatrixBitmap=1;
-uint16_t ServoValue = 0; 
-uint16_t LastServoValue = 0; 
+uint16_t ServoValue = 0;
+uint16_t LastServoValue = 0;
 int16_t powerstateState = 0;
 
 bool MatrixConnected=false;
 bool pushbuttonState = HIGH;
 bool poweronoffState = LOW;
-bool StatusIndicatorState = HIGH; 
-bool DeloreanIsFlying = false; 
+bool StatusIndicatorState = HIGH;
+bool DeloreanIsFlying = false;
 
-unsigned long previousTime = 0; 
-unsigned long previousBitmapTime = 0; 
-unsigned long TimeOutButton = 0; 
-unsigned long startTimeButton = 0; 
-unsigned long LastTimeFlying = 0; 
+unsigned long previousTime = 0;
+unsigned long previousBitmapTime = 0;
+unsigned long TimeOutButton = 0;
+unsigned long startTimeButton = 0;
+unsigned long LastTimeFlying = 0;
 unsigned long timeoutTimeButton = 0;
 
-const char swversion[15] = "0.8 (beta)";
+const char swversion[15] = "0.9";
 
+#if defined(ESP8266)
 const uint8_t PulseInPin = 13; // ESP8266 PulseIn = D7 --- 180k ohm
 const uint8_t pushbutton = 12; //ESP8266 GPIO12 = D6 --- 470-1k ohm
 const uint8_t poweronoff = 14; //ESP8266 GPIO14 = D5 --- Mosfet IRL510
 const uint8_t powerstate = A0; //ESP8266 ADC0 = A0 --- 180k ohm
 const uint8_t StatusIndicator = 2; //ESP8266 GPIO2 = D4
 const uint8_t eqModOnly = 3; // ESP8266 GPIO3 = RX --- to Ground if only the EQ mod is required
+ const uint8_t sdaCheckPin = D4;
+#elif defined(ESP32)
+const uint8_t PulseInPin = 13; // ESP32 PulseIn = D7 --- 180k ohm
+const uint8_t pushbutton = 12; //ESP32 GPIO12 = D6 --- 470-1k ohm
+const uint8_t poweronoff = 14; //ESP32 GPIO14 = D5 --- Mosfet IRL510
+const uint8_t powerstate = 34; //ESP32 ADC0 = A0 --- 180k ohm
+const uint8_t StatusIndicator = 2; //ESP32 GPIO2 = D4
+const uint8_t eqModOnly = 16; // ESP32 GPIO3 = RX --- to Ground if only the EQ mod is required
+const uint8_t sdaCheckPin = 21;
+#endif
+
 
 // --- MQTT Device ---
 String mac = WiFi.macAddress(); // Eindeutige Basis für IDs
@@ -83,7 +102,7 @@ String servoStateTopic;
 String powerStateTopic;
 String powerCommandTopic;
 int8_t wifiRssi;
-int8_t freeRam;
+uint32_t freeRam;
 IPAddress ipAddress;
 #define MSG_BUFFER_SIZE	(2432)
 
@@ -95,36 +114,26 @@ unsigned long lastTryConnect = 0;
 //callback notifying us of the need to save config
 void saveConfigCallback () {
   Serial.println("Should save config");
-  shouldSaveConfig = true;        
+  shouldSaveConfig = true;
 }
 
 void SaveConfig () {
   //save the custom parameters to FS
     Serial.println("saving config");
- #if defined(ARDUINOJSON_VERSION_MAJOR) && ARDUINOJSON_VERSION_MAJOR >= 6
-    DynamicJsonDocument json(1024);
-#else
-    DynamicJsonBuffer jsonBuffer;
-    JsonObject& json = jsonBuffer.createObject();
-#endif
+    JsonDocument json;
     json["mqtt_server"] = mqtt_server;
     json["mqtt_port"] = mqtt_port;
     json["mqtt_user"] = mqtt_user;
     json["mqtt_password"] = mqtt_password;
     json["mqtt_ha_topic"] = mqtt_ha_topic;
-    
-    File configFile = SPIFFS.open("/config.json", "w");
+
+    File configFile = LittleFS.open("/config.json", "w");
     if (!configFile) {
       Serial.println("\033[1;31mfailed to open config file for writing\033[0m");
     }
 
-#if defined(ARDUINOJSON_VERSION_MAJOR) && ARDUINOJSON_VERSION_MAJOR >= 6
     serializeJson(json, Serial);
     serializeJson(json, configFile);
-#else
-    json.printTo(Serial);
-    json.printTo(configFile);
-#endif
     configFile.close();
     //end save
 }
@@ -140,12 +149,12 @@ void setupReadConfig() {
   //read configuration from FS json
   Serial.println("mounting FS...");
 
-  if (SPIFFS.begin()) {
+  if (LittleFS.begin()) {
     Serial.println("mounted file system");
-    if (SPIFFS.exists("/config.json")) {
+    if (LittleFS.exists("/config.json")) {
       //file exists, reading and loading
       Serial.println("reading config file");
-      File configFile = SPIFFS.open("/config.json", "r");
+      File configFile = LittleFS.open("/config.json", "r");
       if (configFile) {
         Serial.println("opened config file");
         size_t size = configFile.size();
@@ -154,24 +163,17 @@ void setupReadConfig() {
 
         configFile.readBytes(buf.get(), size);
 
- #if defined(ARDUINOJSON_VERSION_MAJOR) && ARDUINOJSON_VERSION_MAJOR >= 6
-        DynamicJsonDocument json(1024);
+        JsonDocument json;
         auto deserializeError = deserializeJson(json, buf.get());
         serializeJson(json, Serial);
         if ( ! deserializeError ) {
-#else
-        DynamicJsonBuffer jsonBuffer;
-        JsonObject& json = jsonBuffer.parseObject(buf.get());
-        json.printTo(Serial);
-        if (json.success()) {
-#endif
           Serial.println("\nparsed json");
           strcpy(mqtt_server, json["mqtt_server"]);
           strcpy(mqtt_port, json["mqtt_port"]);
           strcpy(mqtt_ha_topic, json["mqtt_ha_topic"]);
           strcpy(mqtt_user, json["mqtt_user"]);
           strcpy(mqtt_password, json["mqtt_password"]);
-          Serial.println("Password: "+String(json["password"]));
+          Serial.println("Password: "+json["password"].as<String>());
         } else {
           Serial.println("\033[1;31mfailed to load json config\033[0m");
         }
@@ -231,6 +233,127 @@ void setupWifi() {
     SaveConfig();
   }
 }
+
+String sendHTMLHead() {
+  String ptr = "<!DOCTYPE html> <html>\n";
+  ptr += "<head>";
+  ptr += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
+  ptr += "<title>Flying Delorean Did3D</title>\n";  
+  ptr += "<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}\n";
+  ptr += "body{margin-top: 25px; background-color: black; background-image: url('/BTTF2.webp'); background-repeat: no-repeat; background-position: center 50px;} h1 {color: #444444;margin: 50px auto 30px;} h3 {color: #444444;margin-bottom: 50px;} form {margin-bottom: 30px;} img{max-width:300px;}\n";  
+  ptr += ".button {display: block;width: 150px;background-color: #deea26;border: none;text-decoration: none;font-size: 25px;margin: auto;cursor: pointer;border-radius: 4px;}\n";  
+  ptr += ".did3d {background-color: #black; position: fixed;bottom: 15px;right: 15px;}\n";  
+  ptr += ".swversion {background-color: #black; position: fixed;bottom: 10px;left: 10px; color: gray;}\n";  
+  ptr += ".config {background-color: #black; color: lightgray;}\n";  
+  ptr += ".configtable {margin-left: auto;margin-right: auto; text-align: left;}";
+  ptr += ".readonly {background-color: gray; color: lightgray;}";
+
+  /* off-screen-menu */
+  ptr += ".off-screen-menu {background-color: #696969; opacity: 0.85; height: 420px; width: 210px;position: fixed;top: 20px;right: -450px;display: flex;flex-direction: column;align-items: center;justify-content: center;text-align: center;font-size: 1.5rem;transition: .3s ease;}\n";
+  ptr += ".off-screen-menu.active {right: 0;}\n";
+
+  /* nav */
+  ptr += "nav {padding: 1rem;display: flex;background-color: transparent;}\n";
+
+  /* ham menu */
+  ptr += ".ham-menu {height: 40px;width: 40px;margin-left: auto;position: relative;}\n";
+  ptr += ".ham-menu span {height: 5px;width: 100%;background-color: #696969;border-radius: 25px;position: absolute;left: 50%;top: 50%;transform: translate(-50%, -50%);transition: .3s ease;}\n";
+  ptr += ".ham-menu span:nth-child(1) {top: 25%;}\n";
+  ptr += ".ham-menu span:nth-child(3) {top: 75%;}\n";
+  ptr += ".ham-menu.active span {background-color: white;}\n";
+  ptr += ".ham-menu.active span:nth-child(1) {top: 50%;transform: translate(-50%, -50%) rotate(45deg);}\n";
+  ptr += ".ham-menu.active span:nth-child(2) {opacity: 0;}\n";
+  ptr += ".ham-menu.active span:nth-child(3) {top: 50%;transform: translate(-50%, -50%) rotate(-45deg);}\n";
+
+  /* button menu*/
+  ptr += ".button-menu {background-color: #606060;color: white; text-align: left;}\n";
+  ptr += ".button-menu:active {background-color: #565656;color: white; text-align: left;}\n";
+  ptr += ".button-config {background-color: #606060;color: white;}\n";
+  ptr += ".button-config:active {background-color: #565656;color: white;}\n";
+  ptr += ".button-ap {background-color: #606060;color: white;}\n";
+  ptr += ".button-ap:active {background-color: #565656;color: white;}\n";
+  
+  /* button power on/off */
+  ptr += ".button-off {background-color: #7F151A;color: black;}\n";
+  ptr += ".button-off:active {background-color: #7F151A;color: black;}\n";
+  ptr += ".button-on {background-color: #cb2129;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
+  ptr += ".button-on:active {background-color: #A01B21;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
+
+  /* push button */
+  ptr += ".button-short {background-color: #70f74f;color: black;}\n";
+  ptr += ".button-short:active {background-color: #56bc3c;color: black;}\n";
+  ptr += ".button-short-off {background-color: #70f74f;color: black;}\n";
+  ptr += ".button-short-off:active {background-color: #70f74f;color: black;}\n";
+  ptr += ".button-short-on {background-color: #56bc3c;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
+  ptr += ".button-short-on:active {background-color: #60ce42;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
+  ptr += ".button-long {background-color: #dfc048;color: black;}\n";
+  ptr += ".button-long:active {background-color: #b59a3b;color: black;}\n";
+  ptr += ".button-long-off {background-color: #dfc048;color: black;}\n";
+  ptr += ".button-long-off:active {background-color: #dfc048;color: black;}\n";
+  ptr += ".button-long-on {background-color: #b59a3b;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
+  ptr += ".button-long-on:active {background-color: #ccac43;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
+
+  /* button reset */
+  ptr += ".button-reset {background-color: black;color: #7f94a1;position: absolute;bottom: 125px;left: 25px;font-size: 12px}\n";
+  ptr += ".button-reset:active {background-color: #black;color: blue;position: absolute;bottom: 125px;left: 25px;font-size: 12px}\n";
+
+  ptr += "p {font-size: 14px;color: #888;margin-bottom: 10px;}\n";
+  ptr += "</style>\n";
+  ptr += "</head>\n";
+  return ptr;
+}
+
+
+void handle_root() {  
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html", sendHTMLHead());
+  server.sendContent(sendHTMLBody());    
+  server.sendContent("");
+}
+
+void handle_ota() {  
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html", sendHTMLHead());
+  server.sendContent(sendHTMLota());    
+  server.sendContent("");
+}
+
+void handle_btn() {
+  String btnPin = server.arg("btnPin");
+  String btnState = server.arg("btnState");
+  String powerButton = server.arg("powerbtnState");
+  String httpResponse;
+
+  if (!DeloreanIsFlying) {
+    if (btnPin == "1") {
+      Serial.println("power on/off");    
+      if (!DeloreanIsFlying) {
+        poweronoffState = evaluate_btn_state(powerButton);
+        digitalWrite(poweronoff, poweronoffState);
+        httpResponse = "power " ;
+        httpResponse += poweronoffState ? "on" : "off";
+      }
+      publishPowerState();
+    } else if (btnPin == "2") {      
+      timeoutTimeButton = btnState.toInt();
+      Serial.println("press "+String(timeoutTimeButton)+" ms"); 
+      PushButton();
+      httpResponse = btnState;
+    } else {
+      Serial.println("btn unknow: "+btnPin);
+    }
+  }
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+
+  if (DeloreanIsFlying) {
+    server.send(409, "text/plain", "Conflict: Delorean is flying");
+    server.sendContent("");
+  } else {
+    server.send(200, "text/plain", httpResponse);
+    server.sendContent("");
+  }  
+}
+
 
 void setupWebServer() {  
   // Print local IP address and start web server   
@@ -298,10 +421,10 @@ void setup() {
   }
 
   // Check if is something connected to SDA (D4)
-  pinMode(D4, OUTPUT);
-  digitalWrite(D4, LOW);
-  pinMode(D4, INPUT);
-  if(!digitalRead(D4)) {
+  pinMode(sdaCheckPin, OUTPUT);
+  digitalWrite(sdaCheckPin, LOW);
+  pinMode(sdaCheckPin, INPUT);
+  if(!digitalRead(sdaCheckPin)) {
     return;
   }
   
@@ -313,20 +436,6 @@ void setup() {
     MatrixConnected = true;
     Serial.println("\033[1;32mIS31 Connected\033[0m");
   } 
-}
-
-void handle_root() {  
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", sendHTMLHead());
-  server.sendContent(sendHTMLBody());    
-  server.sendContent("");
-}
-
-void handle_ota() {  
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", sendHTMLHead());
-  server.sendContent(sendHTMLota());    
-  server.sendContent("");
 }
 
 void PushButton() {
@@ -343,7 +452,7 @@ void PushButton() {
 }
 
 uint8_t evaluate_btn_state(String btnState) {
-  uint8_t state;
+  uint8_t state = 40;;
   String lowbtnState = btnState;
   lowbtnState.toLowerCase();
   if (lowbtnState == "off") {
@@ -356,41 +465,6 @@ uint8_t evaluate_btn_state(String btnState) {
   return state;
 }
 
-void handle_btn() {
-  String btnPin = server.arg("btnPin");
-  String btnState = server.arg("btnState");
-  String powerButton = server.arg("powerbtnState");
-  String httpResponse;
-
-  if (!DeloreanIsFlying) {
-    if (btnPin == "1") {
-      Serial.println("power on/off");    
-      if (!DeloreanIsFlying) {
-        poweronoffState = evaluate_btn_state(powerButton);
-        digitalWrite(poweronoff, poweronoffState);
-        httpResponse = "power " ;
-        httpResponse += poweronoffState ? "on" : "off";
-      }
-      publishPowerState();
-    } else if (btnPin == "2") {      
-      timeoutTimeButton = btnState.toInt();
-      Serial.println("press "+String(timeoutTimeButton)+" ms"); 
-      PushButton();
-      httpResponse = btnState;
-    } else {
-      Serial.println("btn unknow: "+btnPin);
-    }
-  }
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-
-  if (DeloreanIsFlying) {
-    server.send(409, "text/plain", "Conflict: Delorean is flying");
-    server.sendContent("");
-  } else {
-    server.send(200, "text/plain", httpResponse);
-    server.sendContent("");
-  }  
-}
 
 void handle_savecfg() {
   char mqtthatopic[40];
@@ -600,7 +674,7 @@ bool loadFromSpiffs(String path){
   else if(path.endsWith(".pdf")) dataType = "application/pdf";
   else if(path.endsWith(".zip")) dataType = "application/zip";
   
-  File dataFile = SPIFFS.open(path.c_str(), "r");
+  File dataFile = LittleFS.open(path.c_str(), "r");
   if (server.hasArg("download")) dataType = "application/octet-stream";
   if (server.streamFile(dataFile, dataType) != dataFile.size()) {
   }
@@ -700,74 +774,6 @@ String build_push_btn_form(String btnStr, String functionStr, int btnDelay) {
   return ptr;
 }
 
-String sendHTMLHead() {
-  String ptr = "<!DOCTYPE html> <html>\n";
-  ptr += "<head>";
-  ptr += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
-  ptr += "<title>Flying Delorean Did3D</title>\n";  
-  ptr += "<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}\n";
-  ptr += "body{margin-top: 25px; background-color: black; background-image: url('/BTTF2.webp'); background-repeat: no-repeat; background-position: center 50px;} h1 {color: #444444;margin: 50px auto 30px;} h3 {color: #444444;margin-bottom: 50px;} form {margin-bottom: 30px;} img{max-width:300px;}\n";  
-  ptr += ".button {display: block;width: 150px;background-color: #deea26;border: none;text-decoration: none;font-size: 25px;margin: auto;cursor: pointer;border-radius: 4px;}\n";  
-  ptr += ".did3d {background-color: #black; position: fixed;bottom: 15px;right: 15px;}\n";  
-  ptr += ".swversion {background-color: #black; position: fixed;bottom: 10px;left: 10px; color: gray;}\n";  
-  ptr += ".config {background-color: #black; color: lightgray;}\n";  
-  ptr += ".configtable {margin-left: auto;margin-right: auto; text-align: left;}";
-  ptr += ".readonly {background-color: gray; color: lightgray;}";
-
-  /* off-screen-menu */
-  ptr += ".off-screen-menu {background-color: #696969; opacity: 0.85; height: 420px; width: 210px;position: fixed;top: 20px;right: -450px;display: flex;flex-direction: column;align-items: center;justify-content: center;text-align: center;font-size: 1.5rem;transition: .3s ease;}\n";
-  ptr += ".off-screen-menu.active {right: 0;}\n";
-
-  /* nav */
-  ptr += "nav {padding: 1rem;display: flex;background-color: transparent;}\n";
-
-  /* ham menu */
-  ptr += ".ham-menu {height: 40px;width: 40px;margin-left: auto;position: relative;}\n";
-  ptr += ".ham-menu span {height: 5px;width: 100%;background-color: #696969;border-radius: 25px;position: absolute;left: 50%;top: 50%;transform: translate(-50%, -50%);transition: .3s ease;}\n";
-  ptr += ".ham-menu span:nth-child(1) {top: 25%;}\n";
-  ptr += ".ham-menu span:nth-child(3) {top: 75%;}\n";
-  ptr += ".ham-menu.active span {background-color: white;}\n";
-  ptr += ".ham-menu.active span:nth-child(1) {top: 50%;transform: translate(-50%, -50%) rotate(45deg);}\n";
-  ptr += ".ham-menu.active span:nth-child(2) {opacity: 0;}\n";
-  ptr += ".ham-menu.active span:nth-child(3) {top: 50%;transform: translate(-50%, -50%) rotate(-45deg);}\n";
-
-  /* button menu*/
-  ptr += ".button-menu {background-color: #606060;color: white; text-align: left;}\n";
-  ptr += ".button-menu:active {background-color: #565656;color: white; text-align: left;}\n";
-  ptr += ".button-config {background-color: #606060;color: white;}\n";
-  ptr += ".button-config:active {background-color: #565656;color: white;}\n";
-  ptr += ".button-ap {background-color: #606060;color: white;}\n";
-  ptr += ".button-ap:active {background-color: #565656;color: white;}\n";
-  
-  /* button power on/off */
-  ptr += ".button-off {background-color: #7F151A;color: black;}\n";
-  ptr += ".button-off:active {background-color: #7F151A;color: black;}\n";
-  ptr += ".button-on {background-color: #cb2129;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
-  ptr += ".button-on:active {background-color: #A01B21;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
-
-  /* push button */
-  ptr += ".button-short {background-color: #70f74f;color: black;}\n";
-  ptr += ".button-short:active {background-color: #56bc3c;color: black;}\n";
-  ptr += ".button-short-off {background-color: #70f74f;color: black;}\n";
-  ptr += ".button-short-off:active {background-color: #70f74f;color: black;}\n";
-  ptr += ".button-short-on {background-color: #56bc3c;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
-  ptr += ".button-short-on:active {background-color: #60ce42;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
-  ptr += ".button-long {background-color: #dfc048;color: black;}\n";
-  ptr += ".button-long:active {background-color: #b59a3b;color: black;}\n";
-  ptr += ".button-long-off {background-color: #dfc048;color: black;}\n";
-  ptr += ".button-long-off:active {background-color: #dfc048;color: black;}\n";
-  ptr += ".button-long-on {background-color: #b59a3b;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
-  ptr += ".button-long-on:active {background-color: #ccac43;color: white; text-shadow: 0px 0px 10px white; box-shadow: 0px 0px 10px white; }\n";
-
-  /* button reset */
-  ptr += ".button-reset {background-color: black;color: #7f94a1;position: absolute;bottom: 125px;left: 25px;font-size: 12px}\n";
-  ptr += ".button-reset:active {background-color: #black;color: blue;position: absolute;bottom: 125px;left: 25px;font-size: 12px}\n";
-
-  ptr += "p {font-size: 14px;color: #888;margin-bottom: 10px;}\n";
-  ptr += "</style>\n";
-  ptr += "</head>\n";
-  return ptr;
-}
 
 String sendConfigHTMLBody() {
   String ptr = "<body>\n";    
@@ -1004,7 +1010,7 @@ void reconnect() {
       String clientId = deviceId;
       if (mqttClient.connect(clientId.c_str(), mqtt_user, mqtt_password)) {      
         Serial.println("\033[1;32mconnected\033[0m");
-        if (mqtt_ha_topic != "") mqttHaDiscoveryConfig();
+        if (mqtt_ha_topic[0] != '\0') mqttHaDiscoveryConfig();
         publishIpState();
         publishMacState();
         publishHostnameState();
@@ -1085,52 +1091,54 @@ void CheckInputs() {
 }
 
 void mqttHaDiscoveryConfig() {  
-  StaticJsonDocument<MSG_BUFFER_SIZE> doc; 
-  JsonObject jsonDevice = doc.createNestedObject("dev"); // Device
-  JsonArray identifiers = jsonDevice.createNestedArray("ids");
+  JsonDocument doc; 
+  JsonObject jsonDevice = doc["dev"].to<JsonObject>(); // Device
+  JsonArray identifiers = jsonDevice["ids"].to<JsonArray>();
   identifiers.add(deviceId); 
   jsonDevice["name"] = "Flying Delorean";  
   jsonDevice["model"] = "Wifi Controller for Did3D Flying DELOREAN";
-  jsonDevice["mf"] = "sequ3ster";  
-  jsonDevice["sn"] = ESP.getChipId();
-
-  #ifdef ESP8266
-    jsonDevice["hw"] = "ESP8266 " + String(ESP.getFlashChipSize()/1048576) + " MB";
+  jsonDevice["mf"] = "sequ3ster";
+  #if defined(ESP32)
+    jsonDevice["sn"] = (uint32_t)ESP.getEfuseMac();
+  #elif defined(ESP8266)
+    jsonDevice["sn"] = ESP.getChipId();
   #endif
 
-  #ifdef ESP32
+  #if defined(ESP32)
     jsonDevice["hw"] = "ESP32 " + String(ESP.getFlashChipSize()/1048576) + " MB";
+  #elif defined(ESP8266)
+    jsonDevice["hw"] = "ESP8266 " + String(ESP.getFlashChipSize()/1048576) + " MB";
   #endif
 
   jsonDevice["sw"] = String(swversion);  
   jsonDevice["cu"] = "http://" + WiFi.localIP().toString();
 
-  JsonObject jsonOrigin = doc.createNestedObject("o"); // Origin
+  JsonObject jsonOrigin = doc["o"].to<JsonObject>(); // Origin
   jsonOrigin["name"] = "delorean2mqtt";
   jsonOrigin["sw"] = String(swversion);
   jsonOrigin["url"] = "https://github.com/sequ3ster/esp_flying_delorean";
   
-  JsonObject components = doc.createNestedObject("cmps"); // Components
-  JsonObject jsonPowerBtn = components.createNestedObject(deviceId + "_switch");
+  JsonObject components = doc["cmps"].to<JsonObject>(); // Components
+  JsonObject jsonPowerBtn = components[deviceId + "_switch"].to<JsonObject>();
   jsonPowerBtn["p"] = "switch"; 
   jsonPowerBtn["name"] = "Power";
   jsonPowerBtn["cmd_t"] = powerCommandTopic;  
   jsonPowerBtn["stat_t"] = powerStateTopic;
   jsonPowerBtn["uniq_id"] = deviceId + "_switch";
 
-  JsonObject jsonShortBtn = components.createNestedObject(deviceId + "_short");
+  JsonObject jsonShortBtn = components[deviceId + "_short"].to<JsonObject>();
   jsonShortBtn["p"] = "button"; 
   jsonShortBtn["name"] = "Scene";
   jsonShortBtn["cmd_t"] = shortcmndTopic;  
   jsonShortBtn["uniq_id"] = deviceId + "_short";
 
-  JsonObject jsonLongBtn = components.createNestedObject(deviceId + "_long");
+  JsonObject jsonLongBtn = components[deviceId + "_long"].to<JsonObject>();
   jsonLongBtn["p"] = "button"; 
   jsonLongBtn["name"] = "Mode";
   jsonLongBtn["cmd_t"] = longcmndTopic;
   jsonLongBtn["uniq_id"] = deviceId + "_long";
   
-  JsonObject jsonMotion = components.createNestedObject(deviceId + "_motion");
+  JsonObject jsonMotion = components[deviceId + "_motion"].to<JsonObject>();
   jsonMotion["p"] = "binary_sensor"; 
   jsonMotion["name"] = "Motion";  
   jsonMotion["stat_t"] = motionStateTopic;
@@ -1139,7 +1147,7 @@ void mqttHaDiscoveryConfig() {
   jsonMotion["pl_on"] = "on";
   jsonMotion["pl_off"] = "off";
 
-  JsonObject jsonServo = components.createNestedObject(deviceId + "_servo");
+  JsonObject jsonServo = components[deviceId + "_servo"].to<JsonObject>();
   jsonServo["p"] = "sensor"; 
   jsonServo["name"] = "Servo";  
   jsonServo["stat_t"] = servoStateTopic;
@@ -1147,7 +1155,7 @@ void mqttHaDiscoveryConfig() {
   jsonServo["uniq_id"] = deviceId + "_servo";  
   jsonServo["unit_of_meas"] = "°";
 
-  JsonObject jsonMacAdd = components.createNestedObject(deviceId + "_mac");
+  JsonObject jsonMacAdd = components[deviceId + "_mac"].to<JsonObject>();
   jsonMacAdd["p"] = "sensor"; 
   jsonMacAdd["name"] = "MAC Address";  
   jsonMacAdd["ent_cat"] = "diagnostic";
@@ -1155,7 +1163,7 @@ void mqttHaDiscoveryConfig() {
   jsonMacAdd["stat_t"] = "stat/" + deviceId + "/mac";
   jsonMacAdd["uniq_id"] = deviceId + "_mac";
 
-  JsonObject jsonBssid = components.createNestedObject(deviceId + "_bssid");
+  JsonObject jsonBssid = components[deviceId + "_bssid"].to<JsonObject>();
   jsonBssid["p"] = "sensor"; 
   jsonBssid["name"] = "Wifi BSSID";  
   jsonBssid["ent_cat"] = "diagnostic";
@@ -1163,7 +1171,7 @@ void mqttHaDiscoveryConfig() {
   jsonBssid["stat_t"] = "stat/" + deviceId + "/bssid";
   jsonBssid["uniq_id"] = deviceId + "_bssid";
 
-  JsonObject jsonIpadd = components.createNestedObject(deviceId + "_ip");
+  JsonObject jsonIpadd = components[deviceId + "_ip"].to<JsonObject>();
   jsonIpadd["p"] = "sensor"; 
   jsonIpadd["name"] = "IP Address";  
   jsonIpadd["ent_cat"] = "diagnostic";
@@ -1171,7 +1179,7 @@ void mqttHaDiscoveryConfig() {
   jsonIpadd["stat_t"] = ipStateTopic;
   jsonIpadd["uniq_id"] = deviceId + "_ip";
 
-  JsonObject jsonHostname = components.createNestedObject(deviceId + "_host");
+  JsonObject jsonHostname = components[deviceId + "_host"].to<JsonObject>();
   jsonHostname["p"] = "sensor"; 
   jsonHostname["name"] = "Hostname";  
   jsonHostname["ent_cat"] = "diagnostic";
@@ -1179,7 +1187,7 @@ void mqttHaDiscoveryConfig() {
   jsonHostname["stat_t"] = "stat/" + deviceId + "/hostname";
   jsonHostname["uniq_id"] = deviceId + "_host";
 
-  JsonObject jsonRssi = components.createNestedObject(deviceId + "_rssi");
+  JsonObject jsonRssi = components[deviceId + "_rssi"].to<JsonObject>();
   jsonRssi["p"] = "sensor"; 
   jsonRssi["name"] = "Wifi RSSI";  
   jsonRssi["ent_cat"] = "diagnostic";
@@ -1188,7 +1196,7 @@ void mqttHaDiscoveryConfig() {
   jsonRssi["stat_t"] = "stat/" + deviceId + "/rssi";
   jsonRssi["uniq_id"] = deviceId + "_rssi";
 
-  JsonObject ssid = components.createNestedObject(deviceId + "_ssid");
+  JsonObject ssid = components[deviceId + "_ssid"].to<JsonObject>();
   ssid["p"] = "sensor"; 
   ssid["name"] = "Wifi SSID";  
   ssid["ent_cat"] = "diagnostic";
@@ -1196,7 +1204,7 @@ void mqttHaDiscoveryConfig() {
   ssid["stat_t"] = "stat/" + deviceId + "/ssid";
   ssid["uniq_id"] = deviceId + "_ssid";
 
-  JsonObject freeram = components.createNestedObject(deviceId + "_freeram");
+  JsonObject freeram = components[deviceId + "_freeram"].to<JsonObject>();
   freeram["p"] = "sensor"; 
   freeram["name"] = "Free RAM";  
   freeram["ent_cat"] = "diagnostic";
@@ -1256,11 +1264,19 @@ void publishHostnameState() {
 
   Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
   Serial.print(topic);
-  Serial.println("\033[1;37m \033[44m " + WiFi.hostname() + " \033[0m");
+
+  #if defined(ESP32)
+    Serial.println("\033[1;37m \033[44m " + String(WiFi.getHostname()) + " \033[0m");
+    if (!mqttClient.publish(topic.c_str(), WiFi.getHostname(), true)) { 
+       Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+    }  
+  #elif defined(ESP8266)
+    Serial.println("\033[1;37m \033[44m " + WiFi.hostname() + " \033[0m");
+    if (!mqttClient.publish(topic.c_str(), WiFi.hostname().c_str(), true)) { 
+       Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+    }  
+  #endif
   
-  if (!mqttClient.publish(topic.c_str(), WiFi.hostname().c_str(), true)) { 
-     Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
-  }  
 }
 
 void publishRssiState() {
@@ -1374,7 +1390,7 @@ void publishServoState() {
 void publishPowerState() {
   if(!mqttClient.connected()) return;
 
-  StaticJsonDocument<30> doc; 
+  JsonDocument doc; 
   String output = String(poweronoffState ? "ON" : "OFF");
   
   Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
@@ -1391,7 +1407,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print(topic);
   Serial.print("] ");
   String message;
-  for (int i = 0; i < length; i++) {
+  for (unsigned int i = 0; i < length; i++) {
     message += (char)payload[i];
   }
   Serial.println("\033[0;30m]\033[46m " + message + " \033[0m");
