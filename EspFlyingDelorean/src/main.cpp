@@ -32,7 +32,7 @@ const unsigned int port = 80;
   WebServer server(port);
 #endif
 
-
+#define WEB_DEBUG
 
 //define your default values here, if there are different values in config.json, they are overwritten.
 char mqtt_server[40];
@@ -86,7 +86,6 @@ const uint8_t StatusIndicator = 19; //ESP32 GPIO19
 const uint8_t eqModOnly = 26; // ESP32 GPIO26 = RX --- to Ground if only the EQ mod is required
 #endif
 
-
 // --- MQTT Device ---
 String mac = WiFi.macAddress(); // Eindeutige Basis für IDs
 String deviceId;
@@ -109,15 +108,62 @@ PubSubClient mqttClient(espClient);
 unsigned long lastMsg = 0;
 unsigned long lastTryConnect = 0;
 
+// conditional debugging (https://arduino.stackexchange.com/questions/28994/will-unnecessary-serial-print-statements-slow-down-my-program)
+#if defined(SERIAL_DEBUG) 
+  #define BEGIN_DEBUG() do { Serial.begin (74800); } while (0)
+  #define TRACE(x)       Serial.print(x)
+  #define TRACELN(x)     Serial.println(x)
+#elif defined(WEB_DEBUG)
+  #define BEGIN_DEBUG()  ((void) 0)
+  #define TRACE(x)       web_log(x)
+  #define TRACELN(x)     web_log_ln(x)
+#else
+  #define BEGIN_DEBUG()  ((void) 0)
+  #define TRACE(x)       ((void) 0)
+  #define TRACELN(x)     ((void) 0)
+#endif // SERIAL_DEBUG
+
+
+#if defined(WEB_DEBUG)
+String webLogBuffer = "";
+
+void web_log_check_memory(void)
+{
+  if (webLogBuffer.length() > 2000) {
+    int nextLine = webLogBuffer.indexOf("<br>");
+    if (nextLine != -1) {
+      webLogBuffer = webLogBuffer.substring(nextLine + 4);
+    } else {
+      webLogBuffer = ""; // Reset if parsing fails
+    }
+  }
+}
+
+template <typename T>
+void web_log(T message) 
+{
+  webLogBuffer += String(message);
+  web_log_check_memory(); 
+}
+
+template <typename T>
+void web_log_ln(T message) 
+{
+  webLogBuffer += String(message) + "<br>";
+  web_log_check_memory(); 
+}
+#endif
+
+
 //callback notifying us of the need to save config
 void saveConfigCallback () {
-  Serial.println("Should save config");
+  TRACELN("INFO: Should save config.");
   shouldSaveConfig = true;
 }
 
 void SaveConfig () {
   //save the custom parameters to FS
-    Serial.println("saving config");
+    TRACELN("INFO: saving config.");
     JsonDocument json;
     json["mqtt_server"] = mqtt_server;
     json["mqtt_port"] = mqtt_port;
@@ -127,7 +173,7 @@ void SaveConfig () {
 
     File configFile = LittleFS.open("/config.json", "w");
     if (!configFile) {
-      Serial.println("\033[1;31mfailed to open config file for writing\033[0m");
+      TRACELN("ERROR: failed to open config file for writing.m");
     }
 
     serializeJson(json, Serial);
@@ -145,16 +191,16 @@ void setupMosfet() {
 
 void setupReadConfig() {
   //read configuration from FS json
-  Serial.println("mounting FS...");
+  TRACELN("INFO: mounting FS...");
 
   if (LittleFS.begin()) {
-    Serial.println("mounted file system");
+    TRACELN("INFO: mounted file system.");
     if (LittleFS.exists("/config.json")) {
       //file exists, reading and loading
-      Serial.println("reading config file");
+      TRACELN("INFO: reading config file.");
       File configFile = LittleFS.open("/config.json", "r");
       if (configFile) {
-        Serial.println("opened config file");
+        TRACELN("INFO: opened config file.");
         size_t size = configFile.size();
         // Allocate a buffer to store contents of the file.
         std::unique_ptr<char[]> buf(new char[size]);
@@ -165,21 +211,20 @@ void setupReadConfig() {
         auto deserializeError = deserializeJson(json, buf.get());
         serializeJson(json, Serial);
         if ( ! deserializeError ) {
-          Serial.println("\nparsed json");
+          TRACELN("INFO: parsed json.");
           strcpy(mqtt_server, json["mqtt_server"]);
           strcpy(mqtt_port, json["mqtt_port"]);
           strcpy(mqtt_ha_topic, json["mqtt_ha_topic"]);
           strcpy(mqtt_user, json["mqtt_user"]);
           strcpy(mqtt_password, json["mqtt_password"]);
-          Serial.println("Password: "+json["password"].as<String>());
         } else {
-          Serial.println("\033[1;31mfailed to load json config\033[0m");
+          TRACELN("ERROR: failed to load json config.");
         }
         configFile.close();
       }
     }
   } else {
-    Serial.println("\033[1;31mfailed to mount FS\033[0m");
+    TRACELN("ERROR: failed to mount FS.");
   }
   //end read
 }
@@ -213,7 +258,7 @@ void setupWifi() {
   //here  "AutoConnectAP"
   //and goes into a blocking loop awaiting configuration
   if (!wifiManager.autoConnect("Flying Delorean")) {
-    Serial.println("\033[1;31mfailed to connect and hit timeout\033[0m");
+    TRACELN("ERROR: failed to connect and hit timeout.");
     delay(3000);
     //reset and try again, or maybe put it to deep sleep
     ESP.restart();
@@ -395,6 +440,15 @@ String sendHTMLHead() {
 String sendHTMLFooter() {  
   String ptr = "<p><img src=\"/Did3d.webp\" alt=\"Did3D.fr\" class=\"did3d\" width=\"32\" height=\"32\"></p>\n";
   ptr += "<div class=\"swversion\">v. " + String(swversion) + "</div>";
+
+  #if defined(WEB_DEBUG)
+  ptr += "  <td></td><td><br></td>"; 
+  ptr += "  </tr><tr>";  
+  ptr += "  <td></td><td>";
+  ptr += webLogBuffer;
+  ptr += "</td>\n</tr><tr>";  
+  #endif 
+
   return ptr;
 }
 
@@ -547,7 +601,7 @@ uint8_t evaluate_btn_state(String btnState) {
   } else if (lowbtnState == "on") {
     state = LOW;
   } else {
-    Serial.println("unknow btn state: "+btnState);
+    TRACELN("INFO: unknow btn state: "+btnState);
   }  
   return state;
 }
@@ -558,12 +612,12 @@ void publishPowerState() {
   JsonDocument doc; 
   String output = String(poweronoffState ? "ON" : "OFF");
   
-  Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
-  Serial.print(powerStateTopic);
-  Serial.println("\033[1;37m \033[44m " + output + " \033[0m");
+  TRACE("INFO: MQTT Publishing State to: ");
+  TRACE(powerStateTopic);
+  TRACELN(" " + output + " ");
 
   if (!mqttClient.publish(powerStateTopic.c_str(), output.c_str(), true)) { 
-     Serial.println("\033[1;31mMQTT Failed to publish power state!\033[0m");
+     TRACELN("ERROR: MQTT Failed to publish power state.");
   }
 }
 
@@ -588,7 +642,7 @@ void handle_btn() {
 
   if (!DeloreanIsFlying) {
     if (btnPin == "1") {
-      Serial.println("power on/off");    
+      TRACELN("INFO: power on/off");    
       if (!DeloreanIsFlying) {
         poweronoffState = evaluate_btn_state(powerButton);
         digitalWrite(poweronoff, poweronoffState);
@@ -598,11 +652,11 @@ void handle_btn() {
       publishPowerState();
     } else if (btnPin == "2") {      
       timeoutTimeButton = btnState.toInt();
-      Serial.println("press "+String(timeoutTimeButton)+" ms"); 
+      TRACELN("INFO: press "+String(timeoutTimeButton)+" ms"); 
       PushButton();
       httpResponse = btnState;
     } else {
-      Serial.println("btn unknow: "+btnPin);
+      TRACELN("INFO: btn unknow: "+btnPin);
     }
   }
   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
@@ -746,13 +800,13 @@ void mqttHaDiscoveryConfig() {
   String output;
   serializeJson(doc, output);
 
-  Serial.print("Publishing config to: ");
-  Serial.print(mqttDeviceConfigTopic);
-  Serial.println(" " + output); 
+  TRACE("INFO: Publishing config to: ");
+  TRACE(mqttDeviceConfigTopic);
+  TRACELN(" " + output); 
 
   
   if (!mqttClient.publish(mqttDeviceConfigTopic.c_str(), output.c_str(), false)) { 
-     Serial.println("\033[1;31mFailed to publish power config!\033[0m");
+     TRACELN("ERROR: Failed to publish power config.");
   } 
   publishPowerState();  
 }
@@ -789,7 +843,7 @@ void handle_savecfg() {
 void handle_ap() {
   server.sendHeader("Location", "http://192.168.4.1/",true);  
   server.send(302, "text/plain", "");
-  Serial.println("Start AP Mode");  
+  TRACELN("INFO: Start AP Mode");  
 
   WiFiManager wifiManager;
   wifiManager.resetSettings();  
@@ -801,7 +855,7 @@ void handle_ap() {
 void handle_restart() {
   server.sendHeader("Location", "/",true);  
   server.send(302, "text/plain", "");
-  Serial.println("Restart");    
+  TRACELN("INFO: Restart");    
   delay(100);
   ESP.restart();
   delay(5000);
@@ -815,7 +869,7 @@ void handle_cfg() {
 }
 
 String sendPageUnknown() {
-    String ptr = "<!DOCTYPE html> <html>\n";
+  String ptr = "<!DOCTYPE html> <html>\n";
   
   ptr += "<head>";
   ptr += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n";
@@ -836,7 +890,7 @@ void handle_NotFound() {
 void handle_publishHaDiscovery() {
   server.sendHeader("Location", "/",true);  
   server.send(302, "text/plain", "");
-  Serial.println("MQTT Home Assistant Discovery Config");
+  TRACELN("INFO: MQTT Home Assistant Discovery Config");
 
   mqttHaDiscoveryConfig();        
 }
@@ -844,7 +898,7 @@ void handle_publishHaDiscovery() {
 void handle_unpublishHaDiscovery() {
   server.sendHeader("Location", "/",true);  
   server.send(302, "text/plain", "");
-  Serial.println("MQTT Home Assistatnt Reset Discovery Config");
+  TRACELN("INFO: MQTT Home Assistatnt Reset Discovery Config");
 
   unpublishHADiscoveryConfig();        
 }
@@ -971,7 +1025,7 @@ void handleWebRequests(){
     message += " NAME:"+server.argName(i) + "\n VALUE:" + server.arg(i) + "\n";
   }
   server.send(404, "text/plain", message);
-  Serial.println(message);
+  TRACELN(message);
 }
 
 void drawmatrix(const uint8_t bmp[], const uint8_t inv_bmp[]) {     
@@ -1071,12 +1125,12 @@ void matrixloop() {
 void publishIpState() {
   if(!mqttClient.connected()) return;
 
-  Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
-  Serial.print(ipStateTopic);
-  Serial.println("\033[1;37m \033[44m " + ipAddress.toString() + " \033[0m");
+  TRACE("INFO: MQTT Publishing State to: ");
+  TRACE(ipStateTopic);
+  TRACELN(" " + ipAddress.toString() + " ");
 
   if (!mqttClient.publish(ipStateTopic.c_str(), ipAddress.toString().c_str(), true)) { 
-     Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+     TRACELN("ERROR: MQTT Failed to publish states.");
   }  
 }
 
@@ -1085,12 +1139,12 @@ void publishMacState() {
 
   String topic = "stat/" + deviceId + "/mac";
 
-  Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
-  Serial.print(topic);
-  Serial.println("\033[1;37m \033[44m " + WiFi.macAddress() + " \033[0m");
+  TRACE("INFO: MQTT Publishing State to: ");
+  TRACE(topic);
+  TRACELN(" " + WiFi.macAddress() + " ");
   
   if (!mqttClient.publish(topic.c_str(), WiFi.macAddress().c_str(), true)) {
-     Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+     TRACELN("ERROR: MQTT Failed to publish states.");
   }  
 }
 
@@ -1099,18 +1153,18 @@ void publishHostnameState() {
 
   String topic = "stat/" + deviceId + "/hostname";
 
-  Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
-  Serial.print(topic);
+  TRACE("INFO: MQTT Publishing State to: ");
+  TRACE(topic);
 
   #if defined(ESP32)
-    Serial.println("\033[1;37m \033[44m " + String(WiFi.getHostname()) + " \033[0m");
+    TRACELN(" " + String(WiFi.getHostname()) + " ");
     if (!mqttClient.publish(topic.c_str(), WiFi.getHostname(), true)) { 
-       Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+       TRACELN("ERROR: MQTT Failed to publish states.");
     }  
   #elif defined(ESP8266)
-    Serial.println("\033[1;37m \033[44m " + WiFi.hostname() + " \033[0m");
+    TRACELN(" " + WiFi.hostname() + " ");
     if (!mqttClient.publish(topic.c_str(), WiFi.hostname().c_str(), true)) { 
-       Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+       TRACELN("ERROR: MQTT Failed to publish states.");
     }  
   #endif
   
@@ -1121,12 +1175,12 @@ void publishRssiState() {
 
   String topic = "stat/" + deviceId + "/rssi";
 
-  Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
-  Serial.print(topic);
-  Serial.println("\033[1;37m \033[44m " + String(WiFi.RSSI()) + " \033[0m");
+  TRACE("INFO: MQTT Publishing State to: ");
+  TRACE(topic);
+  TRACELN(" " + String(WiFi.RSSI()) + " ");
   
   if (!mqttClient.publish(topic.c_str(), String(WiFi.RSSI()).c_str(), true)) { 
-     Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+     TRACELN("ERROR: MQTT Failed to publish states.");
   }  
 }
 
@@ -1135,12 +1189,12 @@ void publishSsidState() {
 
   String topic = "stat/" + deviceId + "/ssid";
 
-  Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
-  Serial.print(topic);
-  Serial.println("\033[1;37m \033[44m " + String(WiFi.SSID()) + " \033[0m");
+  TRACE("INFO: MQTT Publishing State to: ");
+  TRACE(topic);
+  TRACELN(" " + String(WiFi.SSID()) + " ");
   
   if (!mqttClient.publish(topic.c_str(), String(WiFi.SSID()).c_str(), true)) { 
-     Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+     TRACELN("ERROR: MQTT Failed to publish states.");
   }  
 }
 
@@ -1164,12 +1218,12 @@ void publishFreeRamState() {
 
   String topic = "stat/" + deviceId + "/freeram";
 
-  Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
-  Serial.print(topic);
-  Serial.println("\033[1;37m \033[44m " + String(freeRam) + " \033[0m");  
+  TRACE("INFO: MQTT Publishing State to: ");
+  TRACE(topic);
+  TRACELN(" " + String(freeRam) + " ");  
 
   if (!mqttClient.publish(topic.c_str(), String(freeRam).c_str(), true)) { 
-     Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+     TRACELN("ERROR: MQTT Failed to publish states.");
   }  
 }
 
@@ -1181,13 +1235,13 @@ void publishMotionState() {
 
   String output = (DeloreanIsFlying ? "on" : "off");
 
-  Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
-  Serial.print(motionStateTopic);
-  Serial.println("\033[1;37m \033[44m " + String(DeloreanIsFlying) + " \033[0m");
+  TRACE("INFO: MQTT Publishing State to: ");
+  TRACE(motionStateTopic);
+  TRACELN(" " + String(DeloreanIsFlying) + " ");
 
   //if (!mqttClient.publish(motionStateTopic.c_str(), String(DeloreanIsFlying).c_str(), true)) {    
   if (!mqttClient.publish(motionStateTopic.c_str(), output.c_str(), true)) {  
-     Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+     TRACELN("ERROR: MQTT Failed to publish states.");
   }  
 }
 
@@ -1200,12 +1254,12 @@ void publishServoState() {
   // String output;
   // serializeJson(doc, output);
 
-  Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
-  Serial.print(servoStateTopic);
-  Serial.println("\033[1;37m \033[44m" + String(ServoValue / 10) + " \033[0m");
+  TRACE("INFO: MQTT Publishing State to: ");
+  TRACE(servoStateTopic);
+  TRACELN(" " + String(ServoValue / 10) + " ");
 
   if (!mqttClient.publish(servoStateTopic.c_str(), String(ServoValue / 10).c_str(), true)) { 
-     Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+     TRACELN("ERROR: MQTT Failed to publish states.");
   }  
 }
 
@@ -1215,12 +1269,12 @@ void publishBssidState() {
   String topic = "stat/" + deviceId + "/bssid";
   String output = macBytesToString(WiFi.BSSID());
 
-  Serial.print("\033[1;34mMQTT Publishing State to: \033[0m");
-  Serial.print(topic);
-  Serial.println("\033[1;37m \033[44m " + output + " \033[0m");
+  TRACE("INFO: MQTT Publishing State to: ");
+  TRACE(topic);
+  TRACELN(" " + output + " ");
   
   if (!mqttClient.publish(topic.c_str(), output.c_str(), true)) {
-     Serial.println("\033[1;31mMQTT Failed to publish states!\033[0m");
+     TRACELN("ERROR: MQTT Failed to publish states.");
   }  
 }
 
@@ -1229,10 +1283,10 @@ void reconnect() {
     unsigned long now = millis();
     if (now - lastTryConnect > 5000) {
       lastTryConnect = now;
-      Serial.print("Attempting MQTT connection...");       
+      TRACE("Attempting MQTT connection...");       
       String clientId = deviceId;
       if (mqttClient.connect(clientId.c_str(), mqtt_user, mqtt_password)) {      
-        Serial.println("\033[1;32mconnected\033[0m");
+        TRACELN("INFO: MQTT connected.");
         if (mqtt_ha_topic[0] != '\0') mqttHaDiscoveryConfig();
         publishIpState();
         publishMacState();
@@ -1245,9 +1299,9 @@ void reconnect() {
         mqttClient.subscribe(longcmndTopic.c_str());
         mqttClient.subscribe(shortcmndTopic.c_str());
       } else {
-        Serial.print("\033[1;31mfailed, rc=");
-        Serial.print(mqttClient.state());
-        Serial.println(" try again in 5 seconds\033[0m");
+        TRACE("ERROR: MQTT connection failed, rc=");
+        TRACE(mqttClient.state());
+        TRACELN(" try again in 5 seconds.");
       }
     }
   }
@@ -1308,20 +1362,20 @@ void CheckInputs() {
   
   if (DeloreanIsFlying != (ServoValue > 0)) {
     DeloreanIsFlying = ServoValue > 0;
-    Serial.println("DeloreanIsFlying = " + String(DeloreanIsFlying));
+    TRACELN("INFO: DeloreanIsFlying = " + String(DeloreanIsFlying));
     publishMotionState();
   }  
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("\033[1;36mMQTT Message arrived\033[0m [");
-  Serial.print(topic);
-  Serial.print("] ");
+  TRACE("INFO: MQTT Message arrived [");
+  TRACE(topic);
+  TRACELN("] ");
   String message;
   for (unsigned int i = 0; i < length; i++) {
     message += (char)payload[i];
   }
-  Serial.println("\033[0;30m]\033[46m " + message + " \033[0m");
+  TRACELN(": " + message + " ");
 
   if (!DeloreanIsFlying) {  
     if (String(topic) == powerCommandTopic) {            
@@ -1360,7 +1414,7 @@ void setupWebServer() {
   ElegantOTA.begin(&server);
 
   server.begin();
-  Serial.println("\033[1;32mHTTP Server started\033[0m");
+  TRACELN("INFO: HTTP Server started.");
 }
 
 void setupMqtt() {
@@ -1384,7 +1438,7 @@ void setupMqtt() {
 }
 
 void setup() {
-  Serial.begin(74800);
+  BEGIN_DEBUG();  
 
   setupMosfet();
 
@@ -1415,13 +1469,13 @@ void setup() {
     return;
   }*/
   
-  Serial.println("Connecting Adafruit IS31 CharlieWing");  
+  TRACELN("INFO: Connecting Adafruit IS31 CharlieWing.");  
   if(! matrix.begin()) {
-    Serial.println("\033[1;31mIS31 not found\033[0m");
+    TRACELN("ERROR: IS31 not found.");
     return;  
   } else {
     MatrixConnected = true;
-    Serial.println("\033[1;32mIS31 Connected\033[0m");
+    TRACELN("INFO: IS31 Connected.");
   } 
 }
 
