@@ -60,7 +60,6 @@ int16_t powerstateState = 0;
 bool MatrixConnected=false;
 bool pushbuttonState = HIGH;
 bool poweronoffState = LOW;
-bool StatusIndicatorState = HIGH;
 bool DeloreanIsFlying = false;
 
 unsigned long previousTime = 0;
@@ -77,14 +76,12 @@ const uint8_t PulseInPin = D7; // ESP8266 PulseIn = D7 --- 180k ohm
 const uint8_t pushbutton = D6; // ESP8266 GPIO12 = D6 --- 470-1k ohm
 const uint8_t poweronoff = D5; //ESP8266 GPIO14 = D5 --- Mosfet IRL510
 const uint8_t powerstate = A0; //ESP8266 ADC0 = A0 --- 180k ohm
-const uint8_t StatusIndicator = 2; //ESP8266 GPIO2 = D4
 const uint8_t eqModOnly = RX; // ESP8266 GPIO3 = RX --- to Ground if only the EQ mod is required
 #elif defined(ESP32)
 const uint8_t PulseInPin = 16; // ESP32 PulseIn = GPIO16 --- 180k ohm
 const uint8_t pushbutton = 17; // ESP32 pushbutton = GPIO17 --- 470-1k ohm
 const uint8_t poweronoff = 18; // ESP32 poweroff = GPIO18 --- Mosfet IRL510
 const uint8_t powerstate = 34; // ESP32 ADC0 = GPIO34 --- 180k ohm
-const uint8_t StatusIndicator = 19; //ESP32 GPIO19
 const uint8_t eqModOnly = 26; // ESP32 GPIO26 = RX --- to Ground if only the EQ mod is required
 #endif
 
@@ -1465,14 +1462,11 @@ void setup() {
   setupMosfet();
 
   pinMode(pushbutton, OUTPUT);
-  pinMode(StatusIndicator, OUTPUT);
   pinMode(PulseInPin, INPUT);
   pinMode(powerstate, INPUT);
   pushbuttonState = HIGH;  
   powerstateState = 0;
-  StatusIndicatorState = HIGH;
   digitalWrite(pushbutton, pushbuttonState);  
-  digitalWrite(StatusIndicator, StatusIndicatorState);
 
   pinMode(eqModOnly, INPUT_PULLUP);
   if (digitalRead(eqModOnly) == 1) 
