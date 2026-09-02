@@ -32,7 +32,9 @@ const unsigned int port = 80;
   WebServer server(port);
 #endif
 
-#define WEB_DEBUG
+#define SERIAL_DEBUG
+//#define WEB_DEBUG
+//#define MQTT_DEBUG
 
 //define your default values here, if there are different values in config.json, they are overwritten.
 char mqtt_server[40];
@@ -71,12 +73,12 @@ unsigned long timeoutTimeButton = 0;
 const char swversion[15] = "0.9";
 
 #if defined(ESP8266)
-const uint8_t PulseInPin = 13; // ESP8266 PulseIn = D7 --- 180k ohm
-const uint8_t pushbutton = 12; // ESP8266 GPIO12 = D6 --- 470-1k ohm
-const uint8_t poweronoff = 14; //ESP8266 GPIO14 = D5 --- Mosfet IRL510
+const uint8_t PulseInPin = D7; // ESP8266 PulseIn = D7 --- 180k ohm
+const uint8_t pushbutton = D6; // ESP8266 GPIO12 = D6 --- 470-1k ohm
+const uint8_t poweronoff = D5; //ESP8266 GPIO14 = D5 --- Mosfet IRL510
 const uint8_t powerstate = A0; //ESP8266 ADC0 = A0 --- 180k ohm
 const uint8_t StatusIndicator = 2; //ESP8266 GPIO2 = D4
-const uint8_t eqModOnly = 3; // ESP8266 GPIO3 = RX --- to Ground if only the EQ mod is required
+const uint8_t eqModOnly = RX; // ESP8266 GPIO3 = RX --- to Ground if only the EQ mod is required
 #elif defined(ESP32)
 const uint8_t PulseInPin = 16; // ESP32 PulseIn = GPIO16 --- 180k ohm
 const uint8_t pushbutton = 17; // ESP32 pushbutton = GPIO17 --- 470-1k ohm
@@ -439,16 +441,12 @@ String sendHTMLHead() {
 
 String sendHTMLFooter() {  
   String ptr = "<p><img src=\"/Did3d.webp\" alt=\"Did3D.fr\" class=\"did3d\" width=\"32\" height=\"32\"></p>\n";
-  ptr += "<div class=\"swversion\">v. " + String(swversion) + "</div>";
-
+  ptr += "<div class=\"swversion\">v. " + String(swversion) + " ";
   #if defined(WEB_DEBUG)
-  ptr += "  <td></td><td><br></td>"; 
-  ptr += "  </tr><tr>";  
-  ptr += "  <td></td><td>";
   ptr += webLogBuffer;
-  ptr += "</td>\n</tr><tr>";  
-  #endif 
+  #endif
 
+  ptr += "</div>";
   return ptr;
 }
 
@@ -611,10 +609,12 @@ void publishPowerState() {
 
   JsonDocument doc; 
   String output = String(poweronoffState ? "ON" : "OFF");
-  
+
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
   TRACE(powerStateTopic);
   TRACELN(" " + output + " ");
+  #endif
 
   if (!mqttClient.publish(powerStateTopic.c_str(), output.c_str(), true)) { 
      TRACELN("ERROR: MQTT Failed to publish power state.");
@@ -1125,9 +1125,11 @@ void matrixloop() {
 void publishIpState() {
   if(!mqttClient.connected()) return;
 
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
   TRACE(ipStateTopic);
   TRACELN(" " + ipAddress.toString() + " ");
+  #endif
 
   if (!mqttClient.publish(ipStateTopic.c_str(), ipAddress.toString().c_str(), true)) { 
      TRACELN("ERROR: MQTT Failed to publish states.");
@@ -1139,10 +1141,12 @@ void publishMacState() {
 
   String topic = "stat/" + deviceId + "/mac";
 
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
   TRACE(topic);
   TRACELN(" " + WiFi.macAddress() + " ");
-  
+  #endif
+
   if (!mqttClient.publish(topic.c_str(), WiFi.macAddress().c_str(), true)) {
      TRACELN("ERROR: MQTT Failed to publish states.");
   }  
@@ -1153,16 +1157,22 @@ void publishHostnameState() {
 
   String topic = "stat/" + deviceId + "/hostname";
 
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
   TRACE(topic);
+  #endif
 
   #if defined(ESP32)
+    #if defined(MQTT_DEBUG)
     TRACELN(" " + String(WiFi.getHostname()) + " ");
+    #endif
     if (!mqttClient.publish(topic.c_str(), WiFi.getHostname(), true)) { 
        TRACELN("ERROR: MQTT Failed to publish states.");
     }  
   #elif defined(ESP8266)
+    #if defined(MQTT_DEBUG)
     TRACELN(" " + WiFi.hostname() + " ");
+    #endif
     if (!mqttClient.publish(topic.c_str(), WiFi.hostname().c_str(), true)) { 
        TRACELN("ERROR: MQTT Failed to publish states.");
     }  
@@ -1175,10 +1185,12 @@ void publishRssiState() {
 
   String topic = "stat/" + deviceId + "/rssi";
 
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
   TRACE(topic);
   TRACELN(" " + String(WiFi.RSSI()) + " ");
-  
+  #endif
+
   if (!mqttClient.publish(topic.c_str(), String(WiFi.RSSI()).c_str(), true)) { 
      TRACELN("ERROR: MQTT Failed to publish states.");
   }  
@@ -1189,10 +1201,12 @@ void publishSsidState() {
 
   String topic = "stat/" + deviceId + "/ssid";
 
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
   TRACE(topic);
   TRACELN(" " + String(WiFi.SSID()) + " ");
-  
+  #endif
+
   if (!mqttClient.publish(topic.c_str(), String(WiFi.SSID()).c_str(), true)) { 
      TRACELN("ERROR: MQTT Failed to publish states.");
   }  
@@ -1218,9 +1232,11 @@ void publishFreeRamState() {
 
   String topic = "stat/" + deviceId + "/freeram";
 
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
   TRACE(topic);
   TRACELN(" " + String(freeRam) + " ");  
+  #endif
 
   if (!mqttClient.publish(topic.c_str(), String(freeRam).c_str(), true)) { 
      TRACELN("ERROR: MQTT Failed to publish states.");
@@ -1235,9 +1251,11 @@ void publishMotionState() {
 
   String output = (DeloreanIsFlying ? "on" : "off");
 
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
   TRACE(motionStateTopic);
   TRACELN(" " + String(DeloreanIsFlying) + " ");
+  #endif
 
   //if (!mqttClient.publish(motionStateTopic.c_str(), String(DeloreanIsFlying).c_str(), true)) {    
   if (!mqttClient.publish(motionStateTopic.c_str(), output.c_str(), true)) {  
@@ -1254,9 +1272,11 @@ void publishServoState() {
   // String output;
   // serializeJson(doc, output);
 
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
   TRACE(servoStateTopic);
   TRACELN(" " + String(ServoValue / 10) + " ");
+  #endif
 
   if (!mqttClient.publish(servoStateTopic.c_str(), String(ServoValue / 10).c_str(), true)) { 
      TRACELN("ERROR: MQTT Failed to publish states.");
@@ -1269,10 +1289,12 @@ void publishBssidState() {
   String topic = "stat/" + deviceId + "/bssid";
   String output = macBytesToString(WiFi.BSSID());
 
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
   TRACE(topic);
   TRACELN(" " + output + " ");
-  
+  #endif
+
   if (!mqttClient.publish(topic.c_str(), output.c_str(), true)) {
      TRACELN("ERROR: MQTT Failed to publish states.");
   }  
@@ -1453,11 +1475,15 @@ void setup() {
   digitalWrite(StatusIndicator, StatusIndicatorState);
 
   pinMode(eqModOnly, INPUT_PULLUP);
-  if (digitalRead(eqModOnly) == 1) {
+  if (digitalRead(eqModOnly) == 1) 
+  {
+    TRACELN("INFO: Wifi Control mode active.");
     setupReadConfig();
     setupWifi();
     setupMqtt();
     setupWebServer();
+  } else {
+    TRACELN("INFO: EQ LED MODE activate.");
   }
 
   /*
