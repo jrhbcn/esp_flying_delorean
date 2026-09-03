@@ -32,7 +32,7 @@ const unsigned int port = 80;
   WebServer server(port);
 #endif
 
-#define SERIAL_DEBUG
+//#define SERIAL_DEBUG
 //#define WEB_DEBUG
 //#define MQTT_DEBUG
 
@@ -118,7 +118,11 @@ unsigned long lastMsg = 0;
 unsigned long lastTryConnect = 0;
 
 // conditional debugging (https://arduino.stackexchange.com/questions/28994/will-unnecessary-serial-print-statements-slow-down-my-program)
-#if defined(SERIAL_DEBUG) 
+#if defined(SERIAL_DEBUG) && defined(WEB_DEBUG)
+  #define BEGIN_DEBUG() do { Serial.begin(74800); } while (0)
+  #define TRACE(x)      do { Serial.print(x); web_log(x); } while (0)
+  #define TRACELN(x)    do { Serial.println(x); web_log_ln(x); } while (0)
+#elif defined(SERIAL_DEBUG) 
   #define BEGIN_DEBUG() do { Serial.begin (74800); } while (0)
   #define TRACE(x)       Serial.print(x)
   #define TRACELN(x)     Serial.println(x)
@@ -453,10 +457,6 @@ String sendHTMLHead() {
 String sendHTMLFooter() {  
   String ptr = "<p><img src=\"/Did3d.webp\" alt=\"Did3D.fr\" class=\"did3d\" width=\"32\" height=\"32\"></p>\n";
   ptr += "<div class=\"swversion\">v. " + String(swversion) + " ";
-  #if defined(WEB_DEBUG)
-  ptr += webLogBuffer;
-  #endif
-
   ptr += "</div>";
   return ptr;
 }
@@ -471,7 +471,11 @@ String sendHTMLMenu() {
   ptr += "    <input type=\"submit\" class=\"button button-menu\" value=\"Facebook\" onclick=\"window.open('https://www.facebook.com/groups/599517350568861', '_blank');\">\n";  
   ptr += "    <br>\n";
   ptr += "    <input type=\"submit\" class=\"button button-menu\" value=\"Github\" onclick=\"window.open('https://github.com/sequ3ster/esp_flying_delorean\', '_blank');\">\n";  
+  ptr += "    <br>\n";
+  #if defined(WEB_DEBUG)
+  ptr += "    <input type=\"button\" class=\"button button-menu\" value=\"System Log\" onclick=\"location.href='/log';\">\n";
   ptr += "    <br>\n";  
+  #endif
   ptr += "    <input type=\"button\" class=\"button button-menu\" value=\"Update\" onclick=\"location.href='/ota';\">\n";    
   ptr += "    <br>\n";    
   ptr += "    <input type=\"button\" class=\"button button-menu\" value=\"Config\" onclick=\"location.href='/config';\">\n";  
@@ -570,6 +574,49 @@ String sendConfigHTMLBody() {
   ptr += "</body>\n";
   ptr += "</html>\n";    
   return ptr;  
+}
+
+String sendHTMLLog() {
+  String ptr = "<body>\n";
+  ptr += sendHTMLMenu();
+  ptr += sendHTMLFooter();
+  ptr += "<p><br><br><br><br><br><br></p>\n";
+  ptr += "<h1>System Log</h1>\n";
+  ptr += "<div style='width: 90%; max-width: 800px; margin: auto;'>\n";
+  // The terminal window:
+  ptr += "  <div id='logbox' style='background-color: #111; color: #70f74f; padding: 15px; border-radius: 5px; height: 350px; overflow-y: scroll; font-family: Courier, monospace; font-size: 12px; border: 1px solid #333; text-align: left; white-space: pre-wrap;'></div>\n";
+  ptr += "  <div style='margin-top: 15px; text-align: center;'>\n";
+  ptr += "    <input type='button' class='button button-config' value='Clear Log' onclick='clearLog()'>\n";
+  ptr += "  </div>\n";
+  ptr += "</div>\n";
+  
+  // Real-time polling JS:
+  ptr += "<script type='text/javascript'>\n";
+  ptr += "  function fetchLog() {\n";
+  ptr += "    fetch('/logdata')\n";
+  ptr += "      .then(response => response.text())\n";
+  ptr += "      .then(htmlText => {\n";
+  ptr += "        const logbox = document.getElementById('logbox');\n";
+  // Detect if user has scrolled up to inspect previous lines
+  ptr += "        const isScrolledToBottom = logbox.scrollHeight - logbox.clientHeight <= logbox.scrollTop + 30;\n";
+  ptr += "        logbox.innerHTML = htmlText;\n";
+  // Only auto-scroll down if they were already at the bottom
+  ptr += "        if (isScrolledToBottom) {\n";
+  ptr += "          logbox.scrollTop = logbox.scrollHeight;\n";
+  ptr += "        }\n";
+  ptr += "      });\n";
+  ptr += "  }\n";
+  ptr += "  function clearLog() {\n";
+  ptr += "    fetch('/clearlog', { method: 'POST' }).then(() => { fetchLog(); });\n";
+  ptr += "  }\n";
+  // Fetch immediately and poll every 1500 milliseconds
+  ptr += "  fetchLog();\n";
+  ptr += "  setInterval(fetchLog, 1500);\n";
+  ptr += "</script>\n";
+  
+  ptr += "</body>\n";
+  ptr += "</html>\n";
+  return ptr;
 }
 
 String sendHTMLota() {  
@@ -843,9 +890,11 @@ void mqttHaDiscoveryConfig() {
   String output;
   serializeJson(doc, output);
 
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: Publishing config to: ");
   TRACE(mqttDeviceConfigTopic);
   TRACELN(" " + output); 
+  #endif
 
   if(!mqttClient.connected()) 
   {
@@ -921,6 +970,28 @@ void handle_cfg() {
   server.send(200, "text/html", sendHTMLHead());
   server.sendContent(sendConfigHTMLBody());    
   server.sendContent("");  
+}
+
+void handle_log() {
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html", sendHTMLHead());
+  server.sendContent(sendHTMLLog());
+  server.sendContent("");
+}
+
+void handle_logdata() {
+  #if defined(WEB_DEBUG)
+    server.send(200, "text/plain", webLogBuffer);
+  #else
+    server.send(200, "text/plain", "Web logging is disabled. Please define WEB_DEBUG in main.cpp.");
+  #endif
+}
+
+void handle_clearlog() {
+  #if defined(WEB_DEBUG)
+    webLogBuffer = "--- Log Cleared ---<br>";
+  #endif
+  server.send(200, "text/plain", "OK");
 }
 
 String sendPageUnknown() {
@@ -1405,7 +1476,7 @@ void reconnect() {
     unsigned long now = millis();
     if (now - lastTryConnect > 5000) {
       lastTryConnect = now;
-      TRACE("Attempting MQTT connection...");       
+      TRACELN("INFO: Attempting MQTT connection.");       
       String clientId = deviceId;
       if (mqttClient.connect(clientId.c_str(), mqtt_user, mqtt_password)) {      
         TRACELN("INFO: MQTT connected.");
@@ -1472,7 +1543,9 @@ void mqttloop()
     lastMsg = now;
     publishRssiStateChange();
     publishFreeRamStateChanged();
-    TRACELN("INFO: publish RSSI");
+    #if defined(MQTT_DEBUG)
+      TRACELN("INFO: publish RSSI");
+    #endif
   }
 }
 
@@ -1550,6 +1623,11 @@ void setupWebServer() {
   server.on("/powerevents", handle_powerSSE);
   server.on("/longevents", handle_longSSE);
   server.on("/shortevents", handle_shortSSE);
+
+  server.on("/log", handle_log);
+  server.on("/logdata", handle_logdata);
+  server.on("/clearlog", HTTP_POST, handle_clearlog);
+
   server.onNotFound(handleWebRequests);
   
   ElegantOTA.begin(&server);
