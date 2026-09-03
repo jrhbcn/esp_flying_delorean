@@ -36,6 +36,12 @@ const unsigned int port = 80;
 //#define WEB_DEBUG
 //#define MQTT_DEBUG
 
+#if !defined(SERIAL_DEBUG) && !defined(WEB_DEBUG)
+  #if defined(MQTT_DEBUG)
+    #error "Either SERIAL_DEBUG or WEB_DEBUG must be defined to use MQTT_DEBUG"
+  #endif
+#endif
+
 //define your default values here, if there are different values in config.json, they are overwritten.
 char mqtt_server[40];
 char mqtt_port[6] = "1883";
@@ -51,6 +57,8 @@ Adafruit_IS31FL3731_Wing matrix = Adafruit_IS31FL3731_Wing();
 
 //flag for saving data
 bool shouldSaveConfig = false;
+
+uint8_t MatrixBrightness = 10;
 
 uint8_t MatrixBitmap=1;
 uint16_t ServoValue = 0;
@@ -97,10 +105,12 @@ String motionStateTopic;
 String servoStateTopic;
 String powerStateTopic;
 String powerCommandTopic;
+String BrightnessStateTopic;
+String BrightnessCommandTopic;
 int8_t wifiRssi;
 uint32_t freeRam;
 IPAddress ipAddress;
-#define MSG_BUFFER_SIZE	(2432)
+#define MSG_BUFFER_SIZE	(3072)
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
@@ -169,6 +179,7 @@ void SaveConfig () {
     json["mqtt_user"] = mqtt_user;
     json["mqtt_password"] = mqtt_password;
     json["mqtt_ha_topic"] = mqtt_ha_topic;
+    json["matrix_brightness"] = MatrixBrightness;
 
     File configFile = LittleFS.open("/config.json", "w");
     if (!configFile) {
@@ -216,6 +227,9 @@ void setupReadConfig() {
           strcpy(mqtt_ha_topic, json["mqtt_ha_topic"]);
           strcpy(mqtt_user, json["mqtt_user"]);
           strcpy(mqtt_password, json["mqtt_password"]);
+          if (json["matrix_brightness"].is<uint8_t>()) {
+            MatrixBrightness = json["matrix_brightness"];
+          }
         } else {
           TRACELN("ERROR: failed to load json config.");
         }
@@ -537,6 +551,8 @@ String sendConfigHTMLBody() {
   ptr += "  </tr><tr>";
   ptr += "  <td><lable for=\"mqtthatopic\">Discovery Topic</label></td><td><input name=\"mqtthatopic\" value=\"" + String(mqtt_ha_topic) + "\"></td>\n";  
   ptr += "  </tr><tr>";
+  ptr += "  <td><label for=\"matrix_brightness\">Matrix Brightness</label></td><td><input name=\"matrix_brightness\" type=\"number\" min=\"0\" max=\"255\" value=\"" + String(MatrixBrightness) + "\"></td>\n";
+  ptr += "  </tr><tr>";
   ptr += "  <td></td><td><br></td>";  
   ptr += "  </tr><tr>";  
   ptr += "  <td><input type=\"button\" class=\"button button-config\" value=\"Restart\" onclick=\"location.href='/restart';\"></td>";
@@ -602,7 +618,11 @@ uint8_t evaluate_btn_state(String btnState) {
 }
 
 void publishPowerState() {
-  if(!mqttClient.connected()) return;
+  if(!mqttClient.connected()) 
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
 
   JsonDocument doc; 
   String output = String(poweronoffState ? "ON" : "OFF");
@@ -615,6 +635,20 @@ void publishPowerState() {
 
   if (!mqttClient.publish(powerStateTopic.c_str(), output.c_str(), true)) { 
      TRACELN("ERROR: MQTT Failed to publish power state.");
+  }
+}
+
+void publishBrightnessState() 
+{
+  if(!mqttClient.connected()) 
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
+  String output = String(MatrixBrightness);
+
+  if (!mqttClient.publish(BrightnessStateTopic.c_str(), output.c_str(), true)) {
+    TRACELN("ERROR: MQTT Failed to publish brightness state.");
   }
 }
 
@@ -700,6 +734,7 @@ void mqttHaDiscoveryConfig() {
   jsonOrigin["url"] = "https://github.com/sequ3ster/esp_flying_delorean";
   
   JsonObject components = doc["cmps"].to<JsonObject>(); // Components
+
   JsonObject jsonPowerBtn = components[deviceId + "_switch"].to<JsonObject>();
   jsonPowerBtn["p"] = "switch"; 
   jsonPowerBtn["name"] = "Power";
@@ -719,6 +754,17 @@ void mqttHaDiscoveryConfig() {
   jsonLongBtn["cmd_t"] = longcmndTopic;
   jsonLongBtn["uniq_id"] = deviceId + "_long";
   
+  JsonObject jsonMatrixBrightness = components[deviceId + "_brightness"].to<JsonObject>();
+  jsonMatrixBrightness["p"] = "number"; 
+  jsonMatrixBrightness["name"] = "Brightness";
+  jsonMatrixBrightness["cmd_t"] = BrightnessCommandTopic;
+  jsonMatrixBrightness["stat_t"] = BrightnessStateTopic;
+  jsonMatrixBrightness["min"] = 0;
+  jsonMatrixBrightness["max"] = 255;
+  jsonMatrixBrightness["step"] = 1;
+  jsonMatrixBrightness["ic"] = "mdi:brightness-6";
+  jsonMatrixBrightness["uniq_id"] = deviceId + "_brightness";
+
   JsonObject jsonMotion = components[deviceId + "_motion"].to<JsonObject>();
   jsonMotion["p"] = "binary_sensor"; 
   jsonMotion["name"] = "Motion";  
@@ -801,10 +847,18 @@ void mqttHaDiscoveryConfig() {
   TRACE(mqttDeviceConfigTopic);
   TRACELN(" " + output); 
 
+  if(!mqttClient.connected()) 
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
   
   if (!mqttClient.publish(mqttDeviceConfigTopic.c_str(), output.c_str(), false)) { 
-     TRACELN("ERROR: Failed to publish power config.");
+     TRACELN("ERROR: Failed to publish HA discovery config.");
+  } else {
+     TRACELN("INFO: Published HA discovery config.");
   } 
+
   publishPowerState();  
 }
 
@@ -826,6 +880,10 @@ void handle_savecfg() {
   }
 
   if (server.arg("mqtthatopic") != "") mqttHaDiscoveryConfig();
+
+  if (server.hasArg("matrix_brightness")) {
+    MatrixBrightness = server.arg("matrix_brightness").toInt();
+  }
 
   SaveConfig();
 
@@ -1028,7 +1086,7 @@ void handleWebRequests(){
 void drawmatrix(const uint8_t bmp[], const uint8_t inv_bmp[]) {     
   if (MatrixConnected) {  
     //matrix.clear();
-    matrix.drawBitmap(-1, 0, bmp, 8, 15, 255);
+    matrix.drawBitmap(-1, 0, bmp, 8, 15, MatrixBrightness);
     matrix.drawBitmap(-1, 0, inv_bmp, 8, 15, 0);
   }
 }
@@ -1120,7 +1178,11 @@ void matrixloop() {
 }
 
 void publishIpState() {
-  if(!mqttClient.connected()) return;
+  if(!mqttClient.connected())
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
 
   #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Publishing State to: ");
@@ -1134,7 +1196,11 @@ void publishIpState() {
 }
 
 void publishMacState() {
-  if(!mqttClient.connected()) return;
+  if(!mqttClient.connected())
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
 
   String topic = "stat/" + deviceId + "/mac";
 
@@ -1150,7 +1216,11 @@ void publishMacState() {
 }
 
 void publishHostnameState() {
-  if(!mqttClient.connected()) return;
+  if(!mqttClient.connected())
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
 
   String topic = "stat/" + deviceId + "/hostname";
 
@@ -1178,7 +1248,11 @@ void publishHostnameState() {
 }
 
 void publishRssiState() {
-  if(!mqttClient.connected()) return;
+  if(!mqttClient.connected()) 
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
 
   String topic = "stat/" + deviceId + "/rssi";
 
@@ -1194,7 +1268,11 @@ void publishRssiState() {
 }
 
 void publishSsidState() {
-  if(!mqttClient.connected()) return;
+  if(!mqttClient.connected()) 
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
 
   String topic = "stat/" + deviceId + "/ssid";
 
@@ -1225,7 +1303,11 @@ String macBytesToString(byte mac[6]) {
 }
 
 void publishFreeRamState() {
-  if(!mqttClient.connected()) return;
+  if(!mqttClient.connected()) 
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
 
   String topic = "stat/" + deviceId + "/freeram";
 
@@ -1241,7 +1323,11 @@ void publishFreeRamState() {
 }
 
 void publishMotionState() {
-  if(!mqttClient.connected()) return;
+  if(!mqttClient.connected()) 
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
 
   // StaticJsonDocument<30> doc;
   // doc["motion"] = DeloreanIsFlying;
@@ -1261,7 +1347,11 @@ void publishMotionState() {
 }
 
 void publishServoState() {
-  if(!mqttClient.connected()) return;
+  if(!mqttClient.connected()) 
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
 
   // StaticJsonDocument<30> doc;
   // doc["servo"] = ServoValue;
@@ -1281,7 +1371,11 @@ void publishServoState() {
 }
 
 void publishBssidState() {
-  if(!mqttClient.connected()) return;
+  if(!mqttClient.connected()) 
+  {
+    TRACELN("WARN: mqtt client not connected.");
+    return;
+  }
 
   String topic = "stat/" + deviceId + "/bssid";
   String output = macBytesToString(WiFi.BSSID());
@@ -1298,6 +1392,15 @@ void publishBssidState() {
 }
 
 void reconnect() {
+
+  #if defined(MQTT_DEBUG)
+  TRACELN("INFO: inside reconnect()");
+  TRACELN("INFO: mqtt_server = " + String(mqtt_server));
+  TRACELN("INFO: devideId = clientId = " + deviceId);
+  TRACELN("INFO: mqtt_user = " + String(mqtt_user));
+  TRACELN("INFO: mqtt_password = " + String(mqtt_password));
+  #endif
+
   if ((!mqttClient.connected()) & (0 < strlen(mqtt_server))) {
     unsigned long now = millis();
     if (now - lastTryConnect > 5000) {
@@ -1312,11 +1415,13 @@ void reconnect() {
         publishHostnameState();
         publishSsidState();
         publishBssidState();
-        
+        publishBrightnessState(); 
+
         // Topic abo
         mqttClient.subscribe(powerCommandTopic.c_str());
         mqttClient.subscribe(longcmndTopic.c_str());
         mqttClient.subscribe(shortcmndTopic.c_str());
+        mqttClient.subscribe(BrightnessCommandTopic.c_str());
       } else {
         TRACE("ERROR: MQTT connection failed, rc=");
         TRACE(mqttClient.state());
@@ -1343,8 +1448,13 @@ void publishFreeRamStateChanged() {
 void mqttloop()
 {
   if (!mqttClient.connected()) {
+    TRACELN("WARN: mqtt client not connected.");
     reconnect();
-    if (!mqttClient.connected()) return;
+    if(!mqttClient.connected()) 
+    {
+      TRACELN("ERROR: mqtt client not connected just after reconnect()");
+      return;
+    }
   } 
 
   if (ipAddress != WiFi.localIP()) { 
@@ -1362,6 +1472,7 @@ void mqttloop()
     lastMsg = now;
     publishRssiStateChange();
     publishFreeRamStateChanged();
+    TRACELN("INFO: publish RSSI");
   }
 }
 
@@ -1386,15 +1497,21 @@ void CheckInputs() {
   }  
 }
 
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
+void mqttCallback(char* topic, byte* payload, unsigned int length) 
+{
+
+  #if defined(MQTT_DEBUG)
   TRACE("INFO: MQTT Message arrived [");
   TRACE(topic);
   TRACELN("] ");
+  #endif
   String message;
   for (unsigned int i = 0; i < length; i++) {
     message += (char)payload[i];
   }
+  #if defined(MQTT_DEBUG)
   TRACELN(": " + message + " ");
+  #endif
 
   if (!DeloreanIsFlying) {  
     if (String(topic) == powerCommandTopic) {            
@@ -1410,6 +1527,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       timeoutTimeButton = 1000;
       PushButton();
       server.sendHeader("Location", "/",true); 
+    } else if(String(topic) == BrightnessCommandTopic) {
+      int incomingValue = message.toInt(); 
+      MatrixBrightness = constrain(incomingValue, 0, 255);
+      publishBrightnessState();
+      SaveConfig();
     }
   }
 }
@@ -1450,6 +1572,8 @@ void setupMqtt() {
   longcmndTopic = "cmnd/" + deviceId + "/long";
   powerStateTopic = "stat/" + deviceId + "/switch";
   powerCommandTopic = "cmnd/" + deviceId + "/switch";
+  BrightnessStateTopic = "stat/" + deviceId + "/brightness";
+  BrightnessCommandTopic = "cmnd/" + deviceId + "/brightness";
   
   mqttClient.setServer(mqtt_server, String(mqtt_port).toInt());
   mqttClient.setCallback(mqttCallback);  
@@ -1458,6 +1582,12 @@ void setupMqtt() {
 
 void setup() {
   BEGIN_DEBUG();  
+
+  #if defined(SERIAL_DEBUG) || defined(WEB_DEBUG)
+    delay(5000);
+  #endif
+
+  TRACELN("INFO: Begin setup().");
 
   setupMosfet();
 
@@ -1497,6 +1627,9 @@ void setup() {
     MatrixConnected = true;
     TRACELN("INFO: IS31 Connected.");
   } 
+
+  TRACELN("INFO: End setup().");
+
 }
 
 void loop() {    
