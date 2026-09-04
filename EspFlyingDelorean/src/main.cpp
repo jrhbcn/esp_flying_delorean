@@ -32,8 +32,8 @@ const unsigned int port = 80;
   WebServer server(port);
 #endif
 
-//#define SERIAL_DEBUG
-//#define WEB_DEBUG
+#define SERIAL_DEBUG
+#define WEB_DEBUG
 //#define MQTT_DEBUG
 
 #if !defined(SERIAL_DEBUG) && !defined(WEB_DEBUG)
@@ -198,7 +198,8 @@ void SaveConfig () {
 
 void setupMosfet() {   
   // IRF9540 datasheet https://www.vishay.com/docs/91078/91078.pdf
-  poweronoffState = LOW;    
+  poweronoffState = LOW;
+  TRACELN("INFO: Power OFF.");
   pinMode(poweronoff, OUTPUT);
   digitalWrite(poweronoff, poweronoffState);  
 }
@@ -723,6 +724,7 @@ void handle_btn() {
       TRACELN("INFO: power on/off");    
       if (!DeloreanIsFlying) {
         poweronoffState = evaluate_btn_state(powerButton);
+        TRACELN("INFO: Power = " + String(poweronoffState ? "ON." : "OFF."));
         digitalWrite(poweronoff, poweronoffState);
         httpResponse = "power " ;
         httpResponse += poweronoffState ? "on" : "off";
@@ -1550,10 +1552,14 @@ void mqttloop()
 }
 
 void CheckInputs() {
-  powerstateState = analogRead(powerstate);  
+  powerstateState = analogRead(powerstate);
+  
+  TRACELN("INFO: Power read = " + String(powerstateState));
+  
   boolean newPoweronoffState = (powerstateState > 300);
   if(poweronoffState != newPoweronoffState) {
     poweronoffState = newPoweronoffState;
+    TRACELN("INFO: Power = " + String(poweronoffState ? "ON." : "OFF."));
     publishPowerState();
   }
     
@@ -1591,6 +1597,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length)
       poweronoffState = message == "ON";
       digitalWrite(poweronoff, poweronoffState);    
       publishPowerState();
+      TRACELN("INFO: Power = " + String(poweronoffState ? "ON." : "OFF."));
       server.sendHeader("Location", "/",true);  
     } else if(String(topic) == longcmndTopic ) {
       timeoutTimeButton = 3100;
